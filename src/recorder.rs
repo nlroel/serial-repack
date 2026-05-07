@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,7 +35,7 @@ enum RecorderEvent {
     Error(anyhow::Error),
 }
 
-pub fn record_from_serial(config: &Config) -> Result<CaptureLog> {
+pub fn record_from_serial(config: &Config, stop_requested: Arc<AtomicBool>) -> Result<CaptureLog> {
     let mut log = CaptureLog::from_config(config)?;
     let (tx, rx) = mpsc::channel();
     let mut handles = Vec::new();
@@ -46,6 +48,7 @@ pub fn record_from_serial(config: &Config) -> Result<CaptureLog> {
 
     for channel in log.channels.clone() {
         let tx = tx.clone();
+        let stop_requested = Arc::clone(&stop_requested);
         handles.push(thread::spawn(move || {
             let result = (|| -> Result<ChannelStats> {
                 let mut reader = serial_io::open_serial_reader(&channel.serial)?;
@@ -56,6 +59,7 @@ pub fn record_from_serial(config: &Config) -> Result<CaptureLog> {
                     channel.tail.clone(),
                     &mut reader,
                     &SystemClock,
+                    &stop_requested,
                     |record| {
                         tx.send(RecorderEvent::Packet(record))
                             .context("record receiver dropped")
@@ -116,6 +120,7 @@ pub fn record_channel_reader<R, C, F>(
     tail: Vec<u8>,
     reader: &mut R,
     clock: &C,
+    stop_requested: &AtomicBool,
     mut on_packet: F,
 ) -> Result<ParserStats>
 where
@@ -127,6 +132,9 @@ where
     let mut buffer = [0u8; 4096];
 
     loop {
+        if stop_requested.load(Ordering::Relaxed) {
+            break;
+        }
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
