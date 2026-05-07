@@ -43,6 +43,6 @@ tail = "55AA"
 
 - `packet_len`: whole packet length in bytes, including header and tail.
 - `header`: fixed header as a hex string.
-- `tail`: fixed tail as a hex string.
+- `tail`: fixed tail as a hex string. Use an empty string (`""`) when your protocol has no tail marker (only header + fixed length).
 
 `packet_len` must be at least `len(header) + len(tail)`.

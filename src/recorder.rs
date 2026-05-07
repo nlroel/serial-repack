@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::mpsc;
 use std::thread;
@@ -36,6 +37,12 @@ pub fn record_from_serial(config: &Config) -> Result<CaptureLog> {
     let mut log = CaptureLog::from_config(config)?;
     let (tx, rx) = mpsc::channel();
     let mut handles = Vec::new();
+    let channel_names: HashMap<u16, String> = log
+        .channels
+        .iter()
+        .map(|ch| (ch.id, ch.name.clone()))
+        .collect();
+    let mut total_packets: u64 = 0;
 
     for channel in log.channels.clone() {
         let tx = tx.clone();
@@ -71,8 +78,24 @@ pub fn record_from_serial(config: &Config) -> Result<CaptureLog> {
 
     for event in rx {
         match event {
-            RecorderEvent::Packet(record) => log.records.push(record),
-            RecorderEvent::Done(stats) => log.stats.push(stats),
+            RecorderEvent::Packet(record) => {
+                total_packets += 1;
+                if total_packets % 100 == 0 {
+                    eprintln!("recording... total packets matched: {total_packets}");
+                }
+                log.records.push(record)
+            }
+            RecorderEvent::Done(stats) => {
+                let name = channel_names
+                    .get(&stats.channel_id)
+                    .map(String::as_str)
+                    .unwrap_or("<unknown>");
+                eprintln!(
+                    "channel done: {name} (id={}) packets={} bad_frames={} discarded_bytes={}",
+                    stats.channel_id, stats.packets, stats.bad_frames, stats.discarded_bytes
+                );
+                log.stats.push(stats)
+            }
             RecorderEvent::Error(err) => return Err(err),
         }
     }
