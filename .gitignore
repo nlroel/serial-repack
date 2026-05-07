@@ -1,0 +1,12 @@
+/target/
+*.srp
+*.log
+*.tmp
+matlab_out/
+capture_out/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
