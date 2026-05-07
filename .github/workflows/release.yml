@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            bin: serial-repack
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            bin: serial-repack.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package Linux
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="serial-repack-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$package"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$package/"
+          cp README.md LICENSE "$package/"
+          cp -R examples docs matlab "$package/"
+          tar -czf "$package.tar.gz" "$package"
+          echo "ASSET=$package.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package Windows
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $package = "serial-repack-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $package | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$package/"
+          Copy-Item README.md,LICENSE "$package/"
+          Copy-Item examples,docs,matlab "$package/" -Recurse
+          Compress-Archive -Path $package -DestinationPath "$package.zip"
+          "ASSET=$package.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-repack-${{ matrix.target }}
+          path: ${{ env.ASSET }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true
