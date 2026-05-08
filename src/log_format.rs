@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -13,16 +14,16 @@ use crate::packet::ParserStats;
 const MAGIC: &[u8; 4] = b"SRP1";
 const RECORD_COUNT_OFFSET: u64 = 6;
 const STAT_COUNT_OFFSET: u64 = 14;
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct LiveLogWriter {
     file: File,
     record_count: u64,
-    stat_count: u16,
-    sync_every: u64,
+    last_checkpoint: Instant,
 }
 
 impl LiveLogWriter {
-    pub fn create(path: impl AsRef<Path>, log: &CaptureLog, sync_every: u64) -> Result<Self> {
+    pub fn create(path: impl AsRef<Path>, log: &CaptureLog) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).with_context(|| {
@@ -55,8 +56,7 @@ impl LiveLogWriter {
         Ok(Self {
             file,
             record_count: 0,
-            stat_count: 0,
-            sync_every: sync_every.max(1),
+            last_checkpoint: Instant::now(),
         })
     }
 
@@ -68,17 +68,13 @@ impl LiveLogWriter {
             .write_u32::<LittleEndian>(u32::try_from(record.packet.len())?)?;
         self.file.write_all(&record.packet)?;
         self.record_count += 1;
-        if self.record_count % self.sync_every == 0 {
-            self.file.seek(SeekFrom::Start(RECORD_COUNT_OFFSET))?;
-            self.file.write_u64::<LittleEndian>(self.record_count)?;
-            self.file.seek(SeekFrom::End(0))?;
-            self.file.sync_data()?;
+        if self.last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
+            self.checkpoint()?;
         }
         Ok(())
     }
 
     pub fn finalize(&mut self, stats: &[ChannelStats]) -> Result<()> {
-        self.stat_count = u16::try_from(stats.len())?;
         for stat in stats {
             self.file.write_u16::<LittleEndian>(stat.channel_id)?;
             self.file.write_u64::<LittleEndian>(stat.packets)?;
@@ -88,11 +84,21 @@ impl LiveLogWriter {
                 .write_u64::<LittleEndian>(stat.incomplete_tail_bytes)?;
         }
         self.file.seek(SeekFrom::Start(STAT_COUNT_OFFSET))?;
-        self.file.write_u16::<LittleEndian>(self.stat_count)?;
+        self.file
+            .write_u16::<LittleEndian>(u16::try_from(stats.len())?)?;
         self.file.seek(SeekFrom::Start(RECORD_COUNT_OFFSET))?;
         self.file.write_u64::<LittleEndian>(self.record_count)?;
         self.file.seek(SeekFrom::End(0))?;
         self.file.sync_all()?;
+        Ok(())
+    }
+
+    fn checkpoint(&mut self) -> Result<()> {
+        self.file.seek(SeekFrom::Start(RECORD_COUNT_OFFSET))?;
+        self.file.write_u64::<LittleEndian>(self.record_count)?;
+        self.file.seek(SeekFrom::End(0))?;
+        self.file.sync_data()?;
+        self.last_checkpoint = Instant::now();
         Ok(())
     }
 }
@@ -378,4 +384,61 @@ fn read_bytes(reader: &mut impl Read) -> Result<Vec<u8>> {
     let mut bytes = vec![0u8; len];
     reader.read_exact(&mut bytes)?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_makes_unfinalized_live_log_readable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("capture.srp");
+        let log = sample_log();
+        let mut writer = LiveLogWriter::create(&path, &log).expect("create live writer");
+
+        writer
+            .write_packet(&PacketRecord {
+                channel_id: 0,
+                timestamp_unix_ns: 100,
+                packet: vec![0xAA, 0x01, 0x55],
+            })
+            .expect("write first packet");
+        writer.last_checkpoint = Instant::now() - CHECKPOINT_INTERVAL - Duration::from_millis(1);
+        writer
+            .write_packet(&PacketRecord {
+                channel_id: 0,
+                timestamp_unix_ns: 200,
+                packet: vec![0xAA, 0x02, 0x55],
+            })
+            .expect("write second packet");
+        drop(writer);
+
+        let decoded = read_log_file(&path).expect("read checkpointed live log");
+        assert_eq!(decoded.records.len(), 2);
+        assert!(decoded.stats.is_empty());
+    }
+
+    fn sample_log() -> CaptureLog {
+        CaptureLog {
+            channels: vec![ChannelMeta {
+                id: 0,
+                name: "radar_a".to_string(),
+                serial: SerialConfig {
+                    port: "/dev/ttyACM0".to_string(),
+                    baud_rate: 921600,
+                    data_bits: 8,
+                    stop_bits: 1,
+                    parity: "none".to_string(),
+                    flow_control: "none".to_string(),
+                    read_timeout_ms: 100,
+                },
+                packet_len: 3,
+                header: vec![0xAA],
+                tail: vec![0x55],
+            }],
+            records: Vec::new(),
+            stats: Vec::new(),
+        }
+    }
 }
