@@ -37,7 +37,7 @@ tail = "55AA"
 - `stop_bits`: one of `1`, `2`; default `1`.
 - `parity`: `none`, `odd`, or `even`; default `none`.
 - `flow_control`: `none`, `software`, or `hardware`; default `none`.
-- `read_timeout_ms`: read timeout; default `100`.
+- `read_timeout_ms`: read timeout in milliseconds; must be greater than `0`; default `100`.
 
 ## Packet Fields
 

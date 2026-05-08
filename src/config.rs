@@ -216,5 +216,12 @@ fn validate_serial(channel: &str, serial: &SerialConfig) -> Result<(), ConfigErr
             value: serial.flow_control.clone(),
         });
     }
+    if serial.read_timeout_ms == 0 {
+        return Err(ConfigError::UnsupportedSerialSetting {
+            channel: channel.to_string(),
+            field: "read_timeout_ms",
+            value: serial.read_timeout_ms.to_string(),
+        });
+    }
     Ok(())
 }

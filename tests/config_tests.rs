@@ -73,3 +73,11 @@ fn rejects_invalid_serial_setting() {
     let err = Config::from_toml_str(&text).unwrap_err().to_string();
     assert!(err.contains("unsupported serial setting"));
 }
+
+#[test]
+fn rejects_zero_read_timeout() {
+    let text = valid_config().replace("read_timeout_ms = 100", "read_timeout_ms = 0");
+    let err = Config::from_toml_str(&text).unwrap_err().to_string();
+    assert!(err.contains("unsupported serial setting"));
+    assert!(err.contains("read_timeout_ms"));
+}
