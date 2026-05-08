@@ -74,7 +74,6 @@ fn rejects_invalid_serial_setting() {
     assert!(err.contains("unsupported serial setting"));
 }
 
-
 #[test]
 fn rejects_zero_read_timeout() {
     let text = valid_config().replace("read_timeout_ms = 100", "read_timeout_ms = 0");

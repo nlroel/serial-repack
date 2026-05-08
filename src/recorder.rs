@@ -140,8 +140,7 @@ pub fn record_from_serial(
                 if last_perf.elapsed() >= Duration::from_secs(1) {
                     eprintln!(
                         "\nperf: packets/s={} dropped_live={}",
-                        interval_packets,
-                        dropped_live_packets
+                        interval_packets, dropped_live_packets
                     );
                     interval_packets = 0;
                     last_perf = Instant::now();
@@ -162,7 +161,6 @@ pub fn record_from_serial(
             RecorderEvent::Error(err) => return Err(err),
         }
     }
-
 
     for handle in handles {
         handle.join().expect("recorder thread panicked");
