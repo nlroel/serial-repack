@@ -11,11 +11,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Record {
-            config,
-            out,
-            sync_every,
-        } => {
+        Command::Record { config, out } => {
             let config = config::Config::from_path(config)?;
             let stop_requested = Arc::new(AtomicBool::new(false));
             let interrupt_count = Arc::new(AtomicU8::new(0));
@@ -36,7 +32,6 @@ fn main() -> Result<()> {
             let live_writer = log_format::LiveLogWriter::create(
                 &out,
                 &log_format::CaptureLog::from_config(&config)?,
-                sync_every,
             )?;
             let log = recorder::record_from_serial(
                 &config,

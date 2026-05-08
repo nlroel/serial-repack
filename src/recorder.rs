@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -75,8 +75,25 @@ pub fn record_from_serial(
                     &SystemClock,
                     &stop_requested,
                     |record| {
-                        tx.send(RecorderEvent::Packet(record))
-                            .context("record receiver dropped")
+                        if stop_requested.load(Ordering::Relaxed) {
+                            return Ok(());
+                        }
+
+                        match tx.try_send(RecorderEvent::Packet(record)) {
+                            Ok(()) => Ok(()),
+                            Err(TrySendError::Full(RecorderEvent::Packet(record))) => {
+                                if stop_requested.load(Ordering::Relaxed) {
+                                    Ok(())
+                                } else {
+                                    tx.send(RecorderEvent::Packet(record))
+                                        .context("record receiver dropped")
+                                }
+                            }
+                            Err(TrySendError::Disconnected(_)) => Ok(()),
+                            Err(TrySendError::Full(_)) => {
+                                unreachable!("only packet events are sent here")
+                            }
+                        }
                     },
                 )?;
                 Ok(ChannelStats::from((channel.id, stats)))
@@ -95,35 +112,25 @@ pub fn record_from_serial(
     drop(tx);
 
     let mut last_render = Instant::now();
-    for event in rx {
-        match event {
-            RecorderEvent::Packet(record) => {
-                if let Some(state) = blink.get_mut(record.channel_id as usize) {
-                    *state = !*state;
-                }
-                if let Some(writer) = live_writer.as_mut() {
-                    writer.write_packet(&record)?;
-                }
-                if last_render.elapsed() >= Duration::from_millis(100) {
-                    render_channel_lamps(&log, &blink);
-                    last_render = Instant::now();
-                }
-                log.records.push(record)
-            }
-            RecorderEvent::Done(stats) => {
-                let name = channel_names
-                    .get(&stats.channel_id)
-                    .map(String::as_str)
-                    .unwrap_or("<unknown>");
-                eprintln!(
-                    "channel done: {name} (id={}) packets={} bad_frames={} discarded_bytes={}",
-                    stats.channel_id, stats.packets, stats.bad_frames, stats.discarded_bytes
-                );
-                log.stats.push(stats)
-            }
-            RecorderEvent::Error(err) => return Err(err),
+    loop {
+        if stop_requested.load(Ordering::Relaxed) {
+            break;
+        }
+
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => handle_recorder_event(
+                event,
+                &mut log,
+                &mut blink,
+                &channel_names,
+                &mut live_writer,
+                &mut last_render,
+            )?,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
+    drop(rx);
 
     for handle in handles {
         handle.join().expect("recorder thread panicked");
@@ -135,6 +142,45 @@ pub fn record_from_serial(
         writer.finalize(&log.stats)?;
     }
     Ok(log)
+}
+
+fn handle_recorder_event(
+    event: RecorderEvent,
+    log: &mut CaptureLog,
+    blink: &mut [bool],
+    channel_names: &HashMap<u16, String>,
+    live_writer: &mut Option<crate::log_format::LiveLogWriter>,
+    last_render: &mut Instant,
+) -> Result<()> {
+    match event {
+        RecorderEvent::Packet(record) => {
+            if let Some(state) = blink.get_mut(record.channel_id as usize) {
+                *state = !*state;
+            }
+            if let Some(writer) = live_writer.as_mut() {
+                writer.write_packet(&record)?;
+            }
+            if last_render.elapsed() >= Duration::from_millis(100) {
+                render_channel_lamps(log, blink);
+                *last_render = Instant::now();
+            }
+            log.records.push(record)
+        }
+        RecorderEvent::Done(stats) => {
+            let name = channel_names
+                .get(&stats.channel_id)
+                .map(String::as_str)
+                .unwrap_or("<unknown>");
+            eprintln!(
+                "channel done: {name} (id={}) packets={} bad_frames={} discarded_bytes={}",
+                stats.channel_id, stats.packets, stats.bad_frames, stats.discarded_bytes
+            );
+            log.stats.push(stats)
+        }
+        RecorderEvent::Error(err) => return Err(err),
+    }
+
+    Ok(())
 }
 
 fn render_channel_lamps(log: &CaptureLog, blink: &[bool]) {
