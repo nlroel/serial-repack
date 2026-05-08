@@ -17,6 +17,8 @@ pub enum Command {
         config: PathBuf,
         #[arg(long)]
         out: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        sync_every: u64,
     },
     Replay {
         #[arg(long = "in")]

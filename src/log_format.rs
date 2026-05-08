@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -11,6 +11,91 @@ use crate::config::{Config, SerialConfig};
 use crate::packet::ParserStats;
 
 const MAGIC: &[u8; 4] = b"SRP1";
+const RECORD_COUNT_OFFSET: u64 = 6;
+const STAT_COUNT_OFFSET: u64 = 14;
+
+pub struct LiveLogWriter {
+    file: File,
+    record_count: u64,
+    stat_count: u16,
+    sync_every: u64,
+}
+
+impl LiveLogWriter {
+    pub fn create(path: impl AsRef<Path>, log: &CaptureLog, sync_every: u64) -> Result<Self> {
+        if let Some(parent) = path.as_ref().parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create parent directory {}", parent.display())
+                })?;
+            }
+        }
+
+        let mut file = File::create(path.as_ref())
+            .with_context(|| format!("failed to create {}", path.as_ref().display()))?;
+        file.write_all(MAGIC)?;
+        file.write_u16::<LittleEndian>(u16::try_from(log.channels.len())?)?;
+        file.write_u64::<LittleEndian>(0)?;
+        file.write_u16::<LittleEndian>(0)?;
+        for channel in &log.channels {
+            file.write_u16::<LittleEndian>(channel.id)?;
+            write_string(&mut file, &channel.name)?;
+            write_string(&mut file, &channel.serial.port)?;
+            file.write_u32::<LittleEndian>(channel.serial.baud_rate)?;
+            file.write_u8(channel.serial.data_bits)?;
+            file.write_u8(channel.serial.stop_bits)?;
+            write_string(&mut file, &channel.serial.parity)?;
+            write_string(&mut file, &channel.serial.flow_control)?;
+            file.write_u64::<LittleEndian>(channel.serial.read_timeout_ms)?;
+            file.write_u32::<LittleEndian>(u32::try_from(channel.packet_len)?)?;
+            write_bytes(&mut file, &channel.header)?;
+            write_bytes(&mut file, &channel.tail)?;
+        }
+        file.sync_data()?;
+        Ok(Self {
+            file,
+            record_count: 0,
+            stat_count: 0,
+            sync_every: sync_every.max(1),
+        })
+    }
+
+    pub fn write_packet(&mut self, record: &PacketRecord) -> Result<()> {
+        self.file.write_u16::<LittleEndian>(record.channel_id)?;
+        self.file
+            .write_u64::<LittleEndian>(record.timestamp_unix_ns)?;
+        self.file
+            .write_u32::<LittleEndian>(u32::try_from(record.packet.len())?)?;
+        self.file.write_all(&record.packet)?;
+        self.record_count += 1;
+        if self.record_count % self.sync_every == 0 {
+            self.file.seek(SeekFrom::Start(RECORD_COUNT_OFFSET))?;
+            self.file.write_u64::<LittleEndian>(self.record_count)?;
+            self.file.seek(SeekFrom::End(0))?;
+            self.file.sync_data()?;
+        }
+        Ok(())
+    }
+
+    pub fn finalize(&mut self, stats: &[ChannelStats]) -> Result<()> {
+        self.stat_count = u16::try_from(stats.len())?;
+        for stat in stats {
+            self.file.write_u16::<LittleEndian>(stat.channel_id)?;
+            self.file.write_u64::<LittleEndian>(stat.packets)?;
+            self.file.write_u64::<LittleEndian>(stat.bad_frames)?;
+            self.file.write_u64::<LittleEndian>(stat.discarded_bytes)?;
+            self.file
+                .write_u64::<LittleEndian>(stat.incomplete_tail_bytes)?;
+        }
+        self.file.seek(SeekFrom::Start(STAT_COUNT_OFFSET))?;
+        self.file.write_u16::<LittleEndian>(self.stat_count)?;
+        self.file.seek(SeekFrom::Start(RECORD_COUNT_OFFSET))?;
+        self.file.write_u64::<LittleEndian>(self.record_count)?;
+        self.file.seek(SeekFrom::End(0))?;
+        self.file.sync_all()?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CaptureLog {
