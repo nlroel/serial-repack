@@ -31,7 +31,7 @@ cargo test
 ## Record
 
 ```bash
-serial-repack record --config examples/multi_channel.toml --out capture.srp
+serial-repack record --config examples/multi_channel.toml --out capture.srp --sync-every 10
 ```
 
 Use Linux port names such as `/dev/ttyUSB0` and Windows port names such as `COM7` in the TOML config.
@@ -85,3 +85,6 @@ serial-repack inspect --in capture.srp
 - [Export](docs/matlab-export.md)
 - [Development](docs/development.md)
 - [Release](docs/release.md)
+
+
+`--sync-every` controls how many packets are buffered before forcing a metadata+data sync to disk (default `1`).

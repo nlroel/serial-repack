@@ -10,7 +10,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Record { config, out } => {
+        Command::Record {
+            config,
+            out,
+            sync_every,
+        } => {
             let config = config::Config::from_path(config)?;
             let stop_requested = Arc::new(AtomicBool::new(false));
             {
@@ -21,8 +25,17 @@ fn main() -> Result<()> {
                     }
                 })?;
             }
-            let log = recorder::record_from_serial(&config, Arc::clone(&stop_requested))?;
-            log_format::write_log_file(&out, &log)?;
+            let live_writer = log_format::LiveLogWriter::create(
+                &out,
+                &log_format::CaptureLog::from_config(&config)?,
+                sync_every,
+            )?;
+            let log = recorder::record_from_serial(
+                &config,
+                Arc::clone(&stop_requested),
+                Some(live_writer),
+            )?;
+            eprintln!();
             println!(
                 "recorded {} packets to {}",
                 log.records.len(),
