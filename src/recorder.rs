@@ -29,6 +29,13 @@ impl Clock for SystemClock {
     }
 }
 
+struct ChannelCaptureSpec {
+    channel_id: u16,
+    packet_len: usize,
+    header: Vec<u8>,
+    tail: Vec<u8>,
+}
+
 enum RecorderEvent {
     Packet(PacketRecord),
     Done(ChannelStats),
@@ -52,11 +59,14 @@ pub fn record_from_serial(config: &Config, stop_requested: Arc<AtomicBool>) -> R
         handles.push(thread::spawn(move || {
             let result = (|| -> Result<ChannelStats> {
                 let mut reader = serial_io::open_serial_reader(&channel.serial)?;
+                let spec = ChannelCaptureSpec {
+                    channel_id: channel.id,
+                    packet_len: channel.packet_len,
+                    header: channel.header.clone(),
+                    tail: channel.tail.clone(),
+                };
                 let stats = record_channel_reader(
-                    channel.id,
-                    channel.packet_len,
-                    channel.header.clone(),
-                    channel.tail.clone(),
+                    spec,
                     &mut reader,
                     &SystemClock,
                     &stop_requested,
@@ -113,11 +123,8 @@ pub fn record_from_serial(config: &Config, stop_requested: Arc<AtomicBool>) -> R
     Ok(log)
 }
 
-pub fn record_channel_reader<R, C, F>(
-    channel_id: u16,
-    packet_len: usize,
-    header: Vec<u8>,
-    tail: Vec<u8>,
+fn record_channel_reader<R, C, F>(
+    spec: ChannelCaptureSpec,
     reader: &mut R,
     clock: &C,
     stop_requested: &AtomicBool,
@@ -128,7 +135,7 @@ where
     C: Clock,
     F: FnMut(PacketRecord) -> Result<()>,
 {
-    let mut parser = PacketParser::new(packet_len, header, tail);
+    let mut parser = PacketParser::new(spec.packet_len, spec.header, spec.tail);
     let mut buffer = [0u8; 4096];
 
     loop {
@@ -140,7 +147,7 @@ where
             Ok(n) => {
                 for packet in parser.push_bytes(&buffer[..n]) {
                     on_packet(PacketRecord {
-                        channel_id,
+                        channel_id: spec.channel_id,
                         timestamp_unix_ns: clock.now_unix_ns(),
                         packet,
                     })?;

@@ -1,6 +1,7 @@
 use serial_repack::config::SerialConfig;
 use serial_repack::log_format::{
-    read_log, read_log_file, write_log, write_log_file, CaptureLog, ChannelMeta, ChannelStats, PacketRecord,
+    read_log, read_log_file, write_log, write_log_file, CaptureLog, ChannelMeta, ChannelStats,
+    PacketRecord,
 };
 
 fn sample_log() -> CaptureLog {
