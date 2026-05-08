@@ -1,4 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -17,11 +18,18 @@ fn main() -> Result<()> {
         } => {
             let config = config::Config::from_path(config)?;
             let stop_requested = Arc::new(AtomicBool::new(false));
+            let interrupt_count = Arc::new(AtomicU8::new(0));
             {
                 let stop_requested = Arc::clone(&stop_requested);
+                let interrupt_count = Arc::clone(&interrupt_count);
                 ctrlc::set_handler(move || {
-                    if !stop_requested.swap(true, Ordering::SeqCst) {
+                    let count = interrupt_count.fetch_add(1, Ordering::SeqCst);
+                    if count == 0 {
+                        stop_requested.store(true, Ordering::SeqCst);
                         eprintln!("interrupt received, stopping capture and writing output...");
+                    } else {
+                        eprintln!("second interrupt received, exiting immediately");
+                        process::exit(130);
                     }
                 })?;
             }

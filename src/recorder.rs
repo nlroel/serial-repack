@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
@@ -42,13 +41,33 @@ enum RecorderEvent {
     Error(anyhow::Error),
 }
 
+enum WriterEvent {
+    Packet(PacketRecord),
+    Finalize(Vec<ChannelStats>),
+}
+
 pub fn record_from_serial(
     config: &Config,
     stop_requested: Arc<AtomicBool>,
-    mut live_writer: Option<crate::log_format::LiveLogWriter>,
+    live_writer: Option<crate::log_format::LiveLogWriter>,
 ) -> Result<CaptureLog> {
     let mut log = CaptureLog::from_config(config)?;
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(4096);
+    let (writer_tx, writer_rx) = mpsc::sync_channel(8192);
+    let writer_handle = live_writer.map(|mut writer| {
+        thread::spawn(move || -> Result<()> {
+            while let Ok(event) = writer_rx.recv() {
+                match event {
+                    WriterEvent::Packet(record) => writer.write_packet(&record)?,
+                    WriterEvent::Finalize(stats) => {
+                        writer.finalize(&stats)?;
+                        break;
+                    }
+                }
+            }
+            Ok(())
+        })
+    });
     let mut handles = Vec::new();
     let channel_names: HashMap<u16, String> = log
         .channels
@@ -71,7 +90,7 @@ pub fn record_from_serial(
                 };
                 let stats = record_channel_reader(
                     spec,
-                    &mut reader,
+                    reader.as_mut(),
                     &SystemClock,
                     &stop_requested,
                     |record| {
@@ -94,16 +113,39 @@ pub fn record_from_serial(
     }
     drop(tx);
 
+    let mut last_render = Instant::now();
+    let mut last_perf = Instant::now();
+    let mut interval_packets = 0u64;
+    let mut dropped_live_packets = 0u64;
     for event in rx {
         match event {
             RecorderEvent::Packet(record) => {
                 if let Some(state) = blink.get_mut(record.channel_id as usize) {
                     *state = !*state;
                 }
-                if let Some(writer) = live_writer.as_mut() {
-                    writer.write_packet(&record)?;
+                if writer_handle.is_some() {
+                    match writer_tx.try_send(WriterEvent::Packet(record.clone())) {
+                        Ok(()) => {}
+                        Err(mpsc::TrySendError::Full(_)) => dropped_live_packets += 1,
+                        Err(mpsc::TrySendError::Disconnected(_)) => {
+                            return Err(anyhow::anyhow!("live writer thread disconnected"));
+                        }
+                    }
                 }
-                render_channel_lamps(&log, &blink);
+                if last_render.elapsed() >= Duration::from_millis(100) {
+                    render_channel_lamps(&log, &blink);
+                    last_render = Instant::now();
+                }
+                interval_packets += 1;
+                if last_perf.elapsed() >= Duration::from_secs(1) {
+                    eprintln!(
+                        "\nperf: packets/s={} dropped_live={}",
+                        interval_packets,
+                        dropped_live_packets
+                    );
+                    interval_packets = 0;
+                    last_perf = Instant::now();
+                }
                 log.records.push(record)
             }
             RecorderEvent::Done(stats) => {
@@ -121,14 +163,20 @@ pub fn record_from_serial(
         }
     }
 
+
     for handle in handles {
         handle.join().expect("recorder thread panicked");
     }
 
     log.records.sort_by_key(|record| record.timestamp_unix_ns);
     log.stats.sort_by_key(|stat| stat.channel_id);
-    if let Some(writer) = live_writer.as_mut() {
-        writer.finalize(&log.stats)?;
+    if writer_handle.is_some() {
+        writer_tx
+            .send(WriterEvent::Finalize(log.stats.clone()))
+            .context("failed to send final stats to live writer")?;
+    }
+    if let Some(handle) = writer_handle {
+        handle.join().expect("live writer thread panicked")?;
     }
     Ok(log)
 }
@@ -163,15 +211,14 @@ fn render_channel_lamps(log: &CaptureLog, blink: &[bool]) {
     eprint!("{line}");
 }
 
-fn record_channel_reader<R, C, F>(
+fn record_channel_reader<C, F>(
     spec: ChannelCaptureSpec,
-    reader: &mut R,
+    reader: &mut dyn serialport::SerialPort,
     clock: &C,
     stop_requested: &AtomicBool,
     mut on_packet: F,
 ) -> Result<ParserStats>
 where
-    R: Read,
     C: Clock,
     F: FnMut(PacketRecord) -> Result<()>,
 {
@@ -182,6 +229,16 @@ where
         if stop_requested.load(Ordering::Relaxed) {
             break;
         }
+
+        match reader.bytes_to_read() {
+            Ok(0) => {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Ok(_) => {}
+            Err(err) => return Err(err.into()),
+        }
+
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
