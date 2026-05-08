@@ -41,11 +41,6 @@ enum RecorderEvent {
     Error(anyhow::Error),
 }
 
-enum WriterEvent {
-    Packet(PacketRecord),
-    Finalize(Vec<ChannelStats>),
-}
-
 pub fn record_from_serial(
     config: &Config,
     stop_requested: Arc<AtomicBool>,
@@ -53,21 +48,7 @@ pub fn record_from_serial(
 ) -> Result<CaptureLog> {
     let mut log = CaptureLog::from_config(config)?;
     let (tx, rx) = mpsc::sync_channel(4096);
-    let (writer_tx, writer_rx) = mpsc::sync_channel(8192);
-    let writer_handle = live_writer.map(|mut writer| {
-        thread::spawn(move || -> Result<()> {
-            while let Ok(event) = writer_rx.recv() {
-                match event {
-                    WriterEvent::Packet(record) => writer.write_packet(&record)?,
-                    WriterEvent::Finalize(stats) => {
-                        writer.finalize(&stats)?;
-                        break;
-                    }
-                }
-            }
-            Ok(())
-        })
-    });
+    let mut live_writer = live_writer;
     let mut handles = Vec::new();
     let channel_names: HashMap<u16, String> = log
         .channels
@@ -114,36 +95,18 @@ pub fn record_from_serial(
     drop(tx);
 
     let mut last_render = Instant::now();
-    let mut last_perf = Instant::now();
-    let mut interval_packets = 0u64;
-    let mut dropped_live_packets = 0u64;
     for event in rx {
         match event {
             RecorderEvent::Packet(record) => {
                 if let Some(state) = blink.get_mut(record.channel_id as usize) {
                     *state = !*state;
                 }
-                if writer_handle.is_some() {
-                    match writer_tx.try_send(WriterEvent::Packet(record.clone())) {
-                        Ok(()) => {}
-                        Err(mpsc::TrySendError::Full(_)) => dropped_live_packets += 1,
-                        Err(mpsc::TrySendError::Disconnected(_)) => {
-                            return Err(anyhow::anyhow!("live writer thread disconnected"));
-                        }
-                    }
+                if let Some(writer) = live_writer.as_mut() {
+                    writer.write_packet(&record)?;
                 }
                 if last_render.elapsed() >= Duration::from_millis(100) {
                     render_channel_lamps(&log, &blink);
                     last_render = Instant::now();
-                }
-                interval_packets += 1;
-                if last_perf.elapsed() >= Duration::from_secs(1) {
-                    eprintln!(
-                        "\nperf: packets/s={} dropped_live={}",
-                        interval_packets, dropped_live_packets
-                    );
-                    interval_packets = 0;
-                    last_perf = Instant::now();
                 }
                 log.records.push(record)
             }
@@ -168,13 +131,8 @@ pub fn record_from_serial(
 
     log.records.sort_by_key(|record| record.timestamp_unix_ns);
     log.stats.sort_by_key(|stat| stat.channel_id);
-    if writer_handle.is_some() {
-        writer_tx
-            .send(WriterEvent::Finalize(log.stats.clone()))
-            .context("failed to send final stats to live writer")?;
-    }
-    if let Some(handle) = writer_handle {
-        handle.join().expect("live writer thread panicked")?;
+    if let Some(mut writer) = live_writer {
+        writer.finalize(&log.stats)?;
     }
     Ok(log)
 }
