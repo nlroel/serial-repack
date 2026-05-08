@@ -1,6 +1,7 @@
 use serial_repack::config::SerialConfig;
 use serial_repack::log_format::{
-    read_log, write_log, CaptureLog, ChannelMeta, ChannelStats, PacketRecord,
+    read_log, read_log_file, write_log, write_log_file, CaptureLog, ChannelMeta, ChannelStats,
+    PacketRecord,
 };
 
 fn sample_log() -> CaptureLog {
@@ -83,4 +84,17 @@ fn rejects_wrong_record_packet_len() {
 
     let err = read_log(bytes.as_slice()).unwrap_err().to_string();
     assert!(err.contains("does not match"));
+}
+
+#[test]
+fn write_log_file_creates_parent_directories() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let nested = temp.path().join("nested").join("capture.srp");
+
+    let log = sample_log();
+    write_log_file(&nested, &log).expect("write nested log");
+
+    assert!(nested.exists());
+    let decoded = read_log_file(&nested).expect("read nested log");
+    assert_eq!(decoded.records.len(), log.records.len());
 }
