@@ -42,7 +42,11 @@ enum RecorderEvent {
     Error(anyhow::Error),
 }
 
-pub fn record_from_serial(config: &Config, stop_requested: Arc<AtomicBool>) -> Result<CaptureLog> {
+pub fn record_from_serial(
+    config: &Config,
+    stop_requested: Arc<AtomicBool>,
+    mut live_writer: Option<crate::log_format::LiveLogWriter>,
+) -> Result<CaptureLog> {
     let mut log = CaptureLog::from_config(config)?;
     let (tx, rx) = mpsc::channel();
     let mut handles = Vec::new();
@@ -51,7 +55,7 @@ pub fn record_from_serial(config: &Config, stop_requested: Arc<AtomicBool>) -> R
         .iter()
         .map(|ch| (ch.id, ch.name.clone()))
         .collect();
-    let mut total_packets: u64 = 0;
+    let mut blink = vec![false; log.channels.len()];
 
     for channel in log.channels.clone() {
         let tx = tx.clone();
@@ -93,10 +97,13 @@ pub fn record_from_serial(config: &Config, stop_requested: Arc<AtomicBool>) -> R
     for event in rx {
         match event {
             RecorderEvent::Packet(record) => {
-                total_packets += 1;
-                if total_packets % 100 == 0 {
-                    eprintln!("recording... total packets matched: {total_packets}");
+                if let Some(state) = blink.get_mut(record.channel_id as usize) {
+                    *state = !*state;
                 }
+                if let Some(writer) = live_writer.as_mut() {
+                    writer.write_packet(&record)?;
+                }
+                render_channel_lamps(&log, &blink);
                 log.records.push(record)
             }
             RecorderEvent::Done(stats) => {
@@ -120,7 +127,40 @@ pub fn record_from_serial(config: &Config, stop_requested: Arc<AtomicBool>) -> R
 
     log.records.sort_by_key(|record| record.timestamp_unix_ns);
     log.stats.sort_by_key(|stat| stat.channel_id);
+    if let Some(writer) = live_writer.as_mut() {
+        writer.finalize(&log.stats)?;
+    }
     Ok(log)
+}
+
+fn render_channel_lamps(log: &CaptureLog, blink: &[bool]) {
+    let name_width = log
+        .channels
+        .iter()
+        .map(|channel| channel.name.chars().count())
+        .max()
+        .unwrap_or(1);
+    let mut channels: Vec<_> = log.channels.iter().collect();
+    channels.sort_by_key(|channel| channel.id);
+    let mut line = String::from("\rchannels: ");
+    for (idx, channel) in channels.iter().enumerate() {
+        let lamp = if blink.get(channel.id as usize).copied().unwrap_or(false) {
+            "🟢"
+        } else {
+            "⚪"
+        };
+        if idx > 0 {
+            line.push_str(" ");
+        }
+        line.push_str(&format!(
+            "#{} {:width$}:{}",
+            channel.id,
+            channel.name,
+            lamp,
+            width = name_width
+        ));
+    }
+    eprint!("{line}");
 }
 
 fn record_channel_reader<R, C, F>(
