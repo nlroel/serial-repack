@@ -62,7 +62,8 @@ impl LiveLogWriter {
 
     pub fn write_packet(&mut self, record: &PacketRecord) -> Result<()> {
         self.file.write_u16::<LittleEndian>(record.channel_id)?;
-        self.file.write_u64::<LittleEndian>(record.timestamp_unix_ns)?;
+        self.file
+            .write_u64::<LittleEndian>(record.timestamp_unix_ns)?;
         self.file
             .write_u32::<LittleEndian>(u32::try_from(record.packet.len())?)?;
         self.file.write_all(&record.packet)?;

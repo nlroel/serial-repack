@@ -30,7 +30,11 @@ fn main() -> Result<()> {
                 &log_format::CaptureLog::from_config(&config)?,
                 sync_every,
             )?;
-            let log = recorder::record_from_serial(&config, Arc::clone(&stop_requested), Some(live_writer))?;
+            let log = recorder::record_from_serial(
+                &config,
+                Arc::clone(&stop_requested),
+                Some(live_writer),
+            )?;
             eprintln!();
             println!(
                 "recorded {} packets to {}",
