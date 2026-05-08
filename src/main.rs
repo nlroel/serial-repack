@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use anyhow::Result;
 use clap::Parser;
 use serial_repack::cli::{Cli, Command};
@@ -9,7 +12,16 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Record { config, out } => {
             let config = config::Config::from_path(config)?;
-            let log = recorder::record_from_serial(&config)?;
+            let stop_requested = Arc::new(AtomicBool::new(false));
+            {
+                let stop_requested = Arc::clone(&stop_requested);
+                ctrlc::set_handler(move || {
+                    if !stop_requested.swap(true, Ordering::SeqCst) {
+                        eprintln!("interrupt received, stopping capture and writing output...");
+                    }
+                })?;
+            }
+            let log = recorder::record_from_serial(&config, Arc::clone(&stop_requested))?;
             log_format::write_log_file(&out, &log)?;
             println!(
                 "recorded {} packets to {}",

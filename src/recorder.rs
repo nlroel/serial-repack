@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,13 +29,20 @@ impl Clock for SystemClock {
     }
 }
 
+struct ChannelCaptureSpec {
+    channel_id: u16,
+    packet_len: usize,
+    header: Vec<u8>,
+    tail: Vec<u8>,
+}
+
 enum RecorderEvent {
     Packet(PacketRecord),
     Done(ChannelStats),
     Error(anyhow::Error),
 }
 
-pub fn record_from_serial(config: &Config) -> Result<CaptureLog> {
+pub fn record_from_serial(config: &Config, stop_requested: Arc<AtomicBool>) -> Result<CaptureLog> {
     let mut log = CaptureLog::from_config(config)?;
     let (tx, rx) = mpsc::channel();
     let mut handles = Vec::new();
@@ -46,16 +55,21 @@ pub fn record_from_serial(config: &Config) -> Result<CaptureLog> {
 
     for channel in log.channels.clone() {
         let tx = tx.clone();
+        let stop_requested = Arc::clone(&stop_requested);
         handles.push(thread::spawn(move || {
             let result = (|| -> Result<ChannelStats> {
                 let mut reader = serial_io::open_serial_reader(&channel.serial)?;
+                let spec = ChannelCaptureSpec {
+                    channel_id: channel.id,
+                    packet_len: channel.packet_len,
+                    header: channel.header.clone(),
+                    tail: channel.tail.clone(),
+                };
                 let stats = record_channel_reader(
-                    channel.id,
-                    channel.packet_len,
-                    channel.header.clone(),
-                    channel.tail.clone(),
+                    spec,
                     &mut reader,
                     &SystemClock,
+                    &stop_requested,
                     |record| {
                         tx.send(RecorderEvent::Packet(record))
                             .context("record receiver dropped")
@@ -109,13 +123,11 @@ pub fn record_from_serial(config: &Config) -> Result<CaptureLog> {
     Ok(log)
 }
 
-pub fn record_channel_reader<R, C, F>(
-    channel_id: u16,
-    packet_len: usize,
-    header: Vec<u8>,
-    tail: Vec<u8>,
+fn record_channel_reader<R, C, F>(
+    spec: ChannelCaptureSpec,
     reader: &mut R,
     clock: &C,
+    stop_requested: &AtomicBool,
     mut on_packet: F,
 ) -> Result<ParserStats>
 where
@@ -123,16 +135,19 @@ where
     C: Clock,
     F: FnMut(PacketRecord) -> Result<()>,
 {
-    let mut parser = PacketParser::new(packet_len, header, tail);
+    let mut parser = PacketParser::new(spec.packet_len, spec.header, spec.tail);
     let mut buffer = [0u8; 4096];
 
     loop {
+        if stop_requested.load(Ordering::Relaxed) {
+            break;
+        }
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
                 for packet in parser.push_bytes(&buffer[..n]) {
                     on_packet(PacketRecord {
-                        channel_id,
+                        channel_id: spec.channel_id,
                         timestamp_unix_ns: clock.now_unix_ns(),
                         packet,
                     })?;
