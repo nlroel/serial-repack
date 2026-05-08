@@ -150,7 +150,7 @@ fn render_channel_lamps(log: &CaptureLog, blink: &[bool]) {
             "⚪"
         };
         if idx > 0 {
-            line.push_str(" ");
+            line.push(' ');
         }
         line.push_str(&format!(
             "#{} {:width$}:{}",
