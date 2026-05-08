@@ -100,6 +100,14 @@ impl From<(u16, ParserStats)> for ChannelStats {
 }
 
 pub fn write_log_file(path: impl AsRef<Path>, log: &CaptureLog) -> Result<()> {
+    if let Some(parent) = path.as_ref().parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create parent directory {}", parent.display())
+            })?;
+        }
+    }
+
     let file = File::create(path.as_ref())
         .with_context(|| format!("failed to create {}", path.as_ref().display()))?;
     write_log(BufWriter::new(file), log)
