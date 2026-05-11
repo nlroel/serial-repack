@@ -31,6 +31,10 @@ impl Clock for SystemClock {
 struct ChannelCaptureSpec {
     channel_id: u16,
     packet_len: usize,
+    baud_rate: u32,
+    data_bits: u8,
+    stop_bits: u8,
+    parity: String,
     header: Vec<u8>,
     tail: Vec<u8>,
 }
@@ -66,6 +70,10 @@ pub fn record_from_serial(
                 let spec = ChannelCaptureSpec {
                     channel_id: channel.id,
                     packet_len: channel.packet_len,
+                    baud_rate: channel.serial.baud_rate,
+                    data_bits: channel.serial.data_bits,
+                    stop_bits: channel.serial.stop_bits,
+                    parity: channel.serial.parity.clone(),
                     header: channel.header.clone(),
                     tail: channel.tail.clone(),
                 };
@@ -244,10 +252,24 @@ where
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
-                for packet in parser.push_bytes(&buffer[..n]) {
+                let packets = parser.push_bytes(&buffer[..n]);
+                let base_timestamp = clock.now_unix_ns();
+                let interval_ns = estimated_packet_interval_ns(
+                    spec.packet_len,
+                    spec.baud_rate,
+                    spec.data_bits,
+                    spec.stop_bits,
+                    &spec.parity,
+                );
+                let first_timestamp = base_timestamp.saturating_sub(
+                    interval_ns.saturating_mul((packets.len().saturating_sub(1)) as u64),
+                );
+
+                for (idx, packet) in packets.into_iter().enumerate() {
                     on_packet(PacketRecord {
                         channel_id: spec.channel_id,
-                        timestamp_unix_ns: clock.now_unix_ns(),
+                        timestamp_unix_ns: first_timestamp
+                            .saturating_add(interval_ns.saturating_mul(idx as u64)),
                         packet,
                     })?;
                 }
@@ -259,4 +281,42 @@ where
     }
 
     Ok(parser.finish())
+}
+
+fn estimated_packet_interval_ns(
+    packet_len: usize,
+    baud_rate: u32,
+    data_bits: u8,
+    stop_bits: u8,
+    parity: &str,
+) -> u64 {
+    if packet_len == 0 || baud_rate == 0 || data_bits == 0 {
+        return 0;
+    }
+    let parity_bits = if parity.eq_ignore_ascii_case("none") {
+        0u128
+    } else {
+        1u128
+    };
+    let bits_per_byte = 1u128 + u128::from(data_bits) + u128::from(stop_bits) + parity_bits;
+    let bits_per_packet = (packet_len as u128) * bits_per_byte;
+    let ns = (bits_per_packet * 1_000_000_000u128) / u128::from(baud_rate);
+    ns.min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::estimated_packet_interval_ns;
+
+    #[test]
+    fn estimates_packet_interval_from_len_and_baud() {
+        assert_eq!(
+            estimated_packet_interval_ns(10, 1_000_000, 8, 1, "none"),
+            100_000
+        );
+        assert_eq!(
+            estimated_packet_interval_ns(10, 1_000_000, 7, 2, "even"),
+            110_000
+        );
+    }
 }
