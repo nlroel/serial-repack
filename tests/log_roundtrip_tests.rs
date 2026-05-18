@@ -49,6 +49,7 @@ fn sample_log() -> CaptureLog {
 fn serial(port: &str) -> SerialConfig {
     SerialConfig {
         port: port.to_string(),
+        passthrough_port: None,
         baud_rate: 115200,
         data_bits: 8,
         stop_bits: 1,
