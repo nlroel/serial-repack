@@ -54,6 +54,8 @@ pub struct ChannelConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SerialConfig {
     pub port: String,
+    #[serde(default)]
+    pub passthrough_port: Option<String>,
     pub baud_rate: u32,
     #[serde(default = "default_data_bits")]
     pub data_bits: u8,

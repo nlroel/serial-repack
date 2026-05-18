@@ -279,6 +279,7 @@ pub fn read_log(mut reader: impl Read) -> Result<CaptureLog> {
             name,
             serial: SerialConfig {
                 port,
+                passthrough_port: None,
                 baud_rate,
                 data_bits,
                 stop_bits,
@@ -426,6 +427,7 @@ mod tests {
                 name: "radar_a".to_string(),
                 serial: SerialConfig {
                     port: "/dev/ttyACM0".to_string(),
+                    passthrough_port: None,
                     baud_rate: 921600,
                     data_bits: 8,
                     stop_bits: 1,

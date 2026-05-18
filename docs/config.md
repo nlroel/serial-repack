@@ -9,6 +9,7 @@ enabled = true
 
 [channels.serial]
 port = "/dev/ttyUSB0"
+passthrough_port = "/dev/ttyUSB10"
 baud_rate = 921600
 data_bits = 8
 stop_bits = 1
@@ -32,6 +33,7 @@ tail = "55AA"
 ## Serial Fields
 
 - `port`: platform serial port path, such as `/dev/ttyUSB0` or `COM7`.
+- `passthrough_port`: optional output serial port for raw-byte passthrough while recording. Example: Linux can point to a `socat` PTY; Windows can point to a `com0com` virtual COM port.
 - `baud_rate`: baud rate.
 - `data_bits`: one of `5`, `6`, `7`, `8`; default `8`.
 - `stop_bits`: one of `1`, `2`; default `1`.

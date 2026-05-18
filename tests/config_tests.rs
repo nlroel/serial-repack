@@ -8,6 +8,7 @@ enabled = true
 
 [channels.serial]
 port = "/dev/ttyUSB0"
+passthrough_port = "/dev/ttyUSB10"
 baud_rate = 921600
 data_bits = 8
 stop_bits = 1
@@ -43,6 +44,10 @@ fn parses_valid_multi_channel_config() {
     assert_eq!(channels.len(), 2);
     assert_eq!(channels[0].name, "radar_a");
     assert_eq!(channels[0].header, vec![0xAA, 0x55]);
+    assert_eq!(
+        channels[0].serial.passthrough_port.as_deref(),
+        Some("/dev/ttyUSB10")
+    );
     assert_eq!(channels[1].serial.data_bits, 8);
 }
 
