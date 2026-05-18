@@ -35,6 +35,7 @@ serial-repack record --config examples/multi_channel.toml --out capture.srp
 ```
 
 Use Linux port names such as `/dev/ttyUSB0` and Windows port names such as `COM7` in the TOML config.
+You can also set `passthrough_port` per channel to forward the raw incoming bytes to another serial port while still recording packets.
 Capture files are appended as packets arrive and checkpointed about once per second so an interrupted process can still recover data up to the latest checkpoint.
 
 ## Replay
