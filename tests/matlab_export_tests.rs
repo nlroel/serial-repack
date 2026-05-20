@@ -46,6 +46,7 @@ fn channel(id: u16, name: &str, packet_len: usize) -> ChannelMeta {
         name: name.to_string(),
         serial: SerialConfig {
             port: "unused".to_string(),
+            passthrough_port: None,
             baud_rate: 115200,
             data_bits: 8,
             stop_bits: 1,

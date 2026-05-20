@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
 use std::sync::Arc;
@@ -67,6 +68,12 @@ pub fn record_from_serial(
         handles.push(thread::spawn(move || {
             let result = (|| -> Result<ChannelStats> {
                 let mut reader = serial_io::open_serial_reader(&channel.serial)?;
+                let mut passthrough_writer = channel
+                    .serial
+                    .passthrough_port
+                    .as_deref()
+                    .map(|port| serial_io::open_serial_writer(&channel.serial, port))
+                    .transpose()?;
                 let spec = ChannelCaptureSpec {
                     channel_id: channel.id,
                     packet_len: channel.packet_len,
@@ -77,33 +84,65 @@ pub fn record_from_serial(
                     header: channel.header.clone(),
                     tail: channel.tail.clone(),
                 };
-                let stats = record_channel_reader(
-                    spec,
-                    reader.as_mut(),
-                    &SystemClock,
-                    &stop_requested,
-                    |record| {
-                        if stop_requested.load(Ordering::Relaxed) {
-                            return Ok(());
-                        }
+                let stats = if let Some(writer) = passthrough_writer.as_mut() {
+                    record_channel_reader(
+                        spec,
+                        reader.as_mut(),
+                        &SystemClock,
+                        &stop_requested,
+                        Some(writer.as_mut()),
+                        |record| {
+                            if stop_requested.load(Ordering::Relaxed) {
+                                return Ok(());
+                            }
 
-                        match tx.try_send(RecorderEvent::Packet(record)) {
-                            Ok(()) => Ok(()),
-                            Err(TrySendError::Full(RecorderEvent::Packet(record))) => {
-                                if stop_requested.load(Ordering::Relaxed) {
-                                    Ok(())
-                                } else {
-                                    tx.send(RecorderEvent::Packet(record))
-                                        .context("record receiver dropped")
+                            match tx.try_send(RecorderEvent::Packet(record)) {
+                                Ok(()) => Ok(()),
+                                Err(TrySendError::Full(RecorderEvent::Packet(record))) => {
+                                    if stop_requested.load(Ordering::Relaxed) {
+                                        Ok(())
+                                    } else {
+                                        tx.send(RecorderEvent::Packet(record))
+                                            .context("record receiver dropped")
+                                    }
+                                }
+                                Err(TrySendError::Disconnected(_)) => Ok(()),
+                                Err(TrySendError::Full(_)) => {
+                                    unreachable!("only packet events are sent here")
                                 }
                             }
-                            Err(TrySendError::Disconnected(_)) => Ok(()),
-                            Err(TrySendError::Full(_)) => {
-                                unreachable!("only packet events are sent here")
+                        },
+                    )?
+                } else {
+                    record_channel_reader(
+                        spec,
+                        reader.as_mut(),
+                        &SystemClock,
+                        &stop_requested,
+                        None,
+                        |record| {
+                            if stop_requested.load(Ordering::Relaxed) {
+                                return Ok(());
                             }
-                        }
-                    },
-                )?;
+
+                            match tx.try_send(RecorderEvent::Packet(record)) {
+                                Ok(()) => Ok(()),
+                                Err(TrySendError::Full(RecorderEvent::Packet(record))) => {
+                                    if stop_requested.load(Ordering::Relaxed) {
+                                        Ok(())
+                                    } else {
+                                        tx.send(RecorderEvent::Packet(record))
+                                            .context("record receiver dropped")
+                                    }
+                                }
+                                Err(TrySendError::Disconnected(_)) => Ok(()),
+                                Err(TrySendError::Full(_)) => {
+                                    unreachable!("only packet events are sent here")
+                                }
+                            }
+                        },
+                    )?
+                };
                 Ok(ChannelStats::from((channel.id, stats)))
             })();
 
@@ -226,6 +265,7 @@ fn record_channel_reader<C, F>(
     reader: &mut dyn serialport::SerialPort,
     clock: &C,
     stop_requested: &AtomicBool,
+    mut passthrough_writer: Option<&mut dyn serialport::SerialPort>,
     mut on_packet: F,
 ) -> Result<ParserStats>
 where
@@ -252,6 +292,15 @@ where
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
+                if let Some(writer) = passthrough_writer.as_mut() {
+                    if let Err(err) = writer.write_all(&buffer[..n]) {
+                        eprintln!(
+                            "warning: disabling passthrough on channel {} after write error: {err}",
+                            spec.channel_id
+                        );
+                        passthrough_writer = None;
+                    }
+                }
                 let packets = parser.push_bytes(&buffer[..n]);
                 let base_timestamp = clock.now_unix_ns();
                 let interval_ns = estimated_packet_interval_ns(
