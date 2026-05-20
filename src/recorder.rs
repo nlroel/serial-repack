@@ -293,9 +293,13 @@ where
             Ok(0) => break,
             Ok(n) => {
                 if let Some(writer) = passthrough_writer.as_mut() {
-                    writer
-                        .write_all(&buffer[..n])
-                        .context("failed to forward serial bytes to passthrough port")?;
+                    if let Err(err) = writer.write_all(&buffer[..n]) {
+                        eprintln!(
+                            "warning: disabling passthrough on channel {} after write error: {err}",
+                            spec.channel_id
+                        );
+                        passthrough_writer = None;
+                    }
                 }
                 let packets = parser.push_bytes(&buffer[..n]);
                 let base_timestamp = clock.now_unix_ns();
