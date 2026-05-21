@@ -60,6 +60,8 @@ pub fn replay_to_serial(
     log: &CaptureLog,
     mappings: &HashMap<String, String>,
     speed: f64,
+    from: Option<f64>,
+    to: Option<f64>,
 ) -> Result<()> {
     if speed <= 0.0 {
         bail!("speed must be greater than 0");
@@ -76,7 +78,7 @@ pub fn replay_to_serial(
     }
 
     let mut sleeper = ThreadSleeper;
-    replay_records(log, &mut writers, &mut sleeper, speed)
+    replay_records(log, &mut writers, &mut sleeper, speed, from, to)
 }
 
 pub fn replay_records<W: PacketWriter, S: Sleeper>(
@@ -84,25 +86,54 @@ pub fn replay_records<W: PacketWriter, S: Sleeper>(
     writers: &mut HashMap<u16, W>,
     sleeper: &mut S,
     speed: f64,
+    from: Option<f64>,
+    to: Option<f64>,
 ) -> Result<()> {
     if speed <= 0.0 {
         bail!("speed must be greater than 0");
     }
 
+    if let (Some(start), Some(end)) = (from, to) {
+        if end < start {
+            bail!("--to must be greater than or equal to --from");
+        }
+    }
+
     let selected: HashSet<u16> = writers.keys().copied().collect();
-    let mut events: Vec<&PacketRecord> = log
+    let mut selected_events: Vec<&PacketRecord> = log
         .records
         .iter()
         .filter(|record| selected.contains(&record.channel_id))
         .collect();
-    events.sort_by_key(|record| record.timestamp_unix_ns);
+    selected_events.sort_by_key(|record| record.timestamp_unix_ns);
+
+    if selected_events.is_empty() {
+        return Ok(());
+    }
+
+    let default_start_ns = log.first_timestamp().unwrap_or(0);
+    let start_ns = from
+        .map(|seconds| unix_seconds_to_ns(seconds, "--from"))
+        .transpose()?
+        .and_then(|target_ns| nearest_timestamp(&selected_events, target_ns))
+        .unwrap_or(default_start_ns);
+
+    let end_ns = to
+        .map(|seconds| unix_seconds_to_ns(seconds, "--to"))
+        .transpose()?
+        .map(|target_ns| nearest_timestamp(&selected_events, target_ns).unwrap_or(target_ns));
+
+    let events: Vec<&PacketRecord> = selected_events
+        .into_iter()
+        .filter(|record| record.timestamp_unix_ns >= start_ns)
+        .filter(|record| end_ns.is_none_or(|end| record.timestamp_unix_ns <= end))
+        .collect();
 
     let Some(first_selected) = events.first().map(|record| record.timestamp_unix_ns) else {
         return Ok(());
     };
-    let first_global = log.first_timestamp().unwrap_or(first_selected);
-    if first_selected > first_global {
-        sleep_scaled(first_selected - first_global, speed, sleeper);
+    if first_selected > start_ns {
+        sleep_scaled(first_selected - start_ns, speed, sleeper);
     }
 
     let mut previous = first_selected;
@@ -125,4 +156,22 @@ fn sleep_scaled<S: Sleeper>(delta_ns: u64, speed: f64, sleeper: &mut S) {
     if scaled_ns > 0.0 {
         sleeper.sleep(Duration::from_nanos(scaled_ns as u64));
     }
+}
+
+fn unix_seconds_to_ns(seconds: f64, arg_name: &str) -> Result<u64> {
+    if seconds < 0.0 {
+        bail!("{arg_name} must be greater than or equal to 0");
+    }
+    let nanos = seconds * 1_000_000_000.0;
+    if !nanos.is_finite() || nanos > u64::MAX as f64 {
+        bail!("{arg_name} is too large");
+    }
+    Ok(nanos.round() as u64)
+}
+
+fn nearest_timestamp(records: &[&PacketRecord], target_ns: u64) -> Option<u64> {
+    records
+        .iter()
+        .min_by_key(|record| record.timestamp_unix_ns.abs_diff(target_ns))
+        .map(|record| record.timestamp_unix_ns)
 }

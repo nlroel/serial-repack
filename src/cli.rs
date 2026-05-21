@@ -25,6 +25,10 @@ pub enum Command {
         mappings: Vec<String>,
         #[arg(long, default_value_t = 1.0)]
         speed: f64,
+        #[arg(long, value_name = "UNIX_SECONDS")]
+        from: Option<f64>,
+        #[arg(long, value_name = "UNIX_SECONDS")]
+        to: Option<f64>,
     },
     Export {
         #[arg(long = "in")]
