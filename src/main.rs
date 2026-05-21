@@ -49,10 +49,12 @@ fn main() -> Result<()> {
             input,
             mappings,
             speed,
+            from,
+            to,
         } => {
             let log = log_format::read_log_file(&input)?;
             let mappings = replay::parse_channel_mappings(&mappings)?;
-            replay::replay_to_serial(&log, &mappings, speed)?;
+            replay::replay_to_serial(&log, &mappings, speed, from, to)?;
         }
         Command::Export { input, out_dir } => {
             let log = log_format::read_log_file(&input)?;

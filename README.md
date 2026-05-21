@@ -51,6 +51,14 @@ serial-repack replay \
 
 Unmapped channels are skipped. Selected channels keep their original global timing.
 
+You can also replay a window with `--from` and optional `--to` (UNIX timestamp):
+
+```bash
+serial-repack replay --in capture.srp --map radar_a=/dev/ttyUSB3 --from 1779670800 --to 1779670820
+```
+
+If `--to` is omitted, replay continues to the end of the capture.
+
 ## Export
 
 ```bash
